@@ -14,7 +14,7 @@
 #
 # You should have received a copy of the GNU Lesser General Public License
 # along with Paramiko; if not, write to the Free Software Foundation, Inc.,
-# 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA.
+# 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301 USA.
 
 """
 `.AuthHandler`
@@ -22,6 +22,7 @@
 
 import weakref
 import time
+import re
 
 from paramiko.common import (
     cMSG_SERVICE_REQUEST,
@@ -61,7 +62,7 @@ from paramiko.common import (
     cMSG_USERAUTH_BANNER,
 )
 from paramiko.message import Message
-from paramiko.py3compat import b, u
+from paramiko.util import b, u
 from paramiko.ssh_exception import (
     SSHException,
     AuthenticationException,
@@ -72,7 +73,7 @@ from paramiko.server import InteractiveQuery
 from paramiko.ssh_gss import GSSAuth, GSS_EXCEPTIONS
 
 
-class AuthHandler(object):
+class AuthHandler:
     """
     Internal class to handle the mechanics of authentication.
     """
@@ -298,6 +299,23 @@ class AuthHandler(object):
                 key_type
             ),
         )
+        # NOTE re #2017: When the key is an RSA cert and the remote server is
+        # OpenSSH 7.7 or earlier, always use ssh-rsa-cert-v01@openssh.com.
+        # Those versions of the server won't support rsa-sha2 family sig algos
+        # for certs specifically, and in tandem with various server bugs
+        # regarding server-sig-algs, it's impossible to fit this into the rest
+        # of the logic here.
+        if key_type.endswith("-cert-v01@openssh.com") and re.search(
+            r"-OpenSSH_(?:[1-6]|7\.[0-7])", self.transport.remote_version
+        ):
+            pubkey_algo = "ssh-rsa-cert-v01@openssh.com"
+            self.transport._agreed_pubkey_algorithm = pubkey_algo
+            self._log(DEBUG, "OpenSSH<7.8 + RSA cert = forcing ssh-rsa!")
+            self._log(
+                DEBUG, "Agreed upon {!r} pubkey algorithm".format(pubkey_algo)
+            )
+            return pubkey_algo
+        # Normal attempts to handshake follow from here.
         # Only consider RSA algos from our list, lest we agree on another!
         my_algos = [x for x in self.transport.preferred_pubkeys if "rsa" in x]
         self._log(DEBUG, "Our pubkey algorithm list: {}".format(my_algos))
@@ -341,13 +359,15 @@ class AuthHandler(object):
                 DEBUG,
                 "NOTE: you may use the 'disabled_algorithms' SSHClient/Transport init kwarg to disable that or other algorithms if your server does not support them!",  # noqa
             )
+        if key_type.endswith("-cert-v01@openssh.com"):
+            pubkey_algo += "-cert-v01@openssh.com"
         self.transport._agreed_pubkey_algorithm = pubkey_algo
         return pubkey_algo
 
     def _parse_service_accept(self, m):
         service = m.get_text()
         if service == "ssh-userauth":
-            # TODO 3.0: this message sucks ass. change it to something more
+            # TODO 4.0: this message sucks ass. change it to something more
             # obvious. it always appears to mean "we already authed" but no! it
             # just means "we are allowed to TRY authing!"
             self._log(DEBUG, "userauth is OK")
@@ -593,9 +613,7 @@ Error Message: {}
                 self._log(INFO, "Auth rejected: public key: {}".format(str(e)))
                 key = None
             except Exception as e:
-                msg = (
-                    "Auth rejected: unsupported or mangled public key ({}: {})"
-                )  # noqa
+                msg = "Auth rejected: unsupported or mangled public key ({}: {})"  # noqa
                 self._log(INFO, msg.format(e.__class__.__name__, e))
                 key = None
             if key is None:
@@ -788,7 +806,7 @@ Error Message: {}
         return
 
     # TODO: do the same to the other tables, in Transport.
-    # TODO 3.0: MAY make sense to make these tables into actual
+    # TODO 4.0: MAY make sense to make these tables into actual
     # classes/instances that can be fed a mode bool or whatever. Or,
     # alternately (both?) make the message types small classes or enums that
     # embed this info within themselves (which could also then tidy up the
@@ -821,7 +839,7 @@ Error Message: {}
             return self._client_handler_table
 
 
-class GssapiWithMicAuthHandler(object):
+class GssapiWithMicAuthHandler:
     """A specialized Auth handler for gssapi-with-mic
 
     During the GSSAPI token exchange we need a modified dispatch table,

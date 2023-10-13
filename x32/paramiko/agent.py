@@ -14,7 +14,7 @@
 #
 # You should have received a copy of the GNU Lesser General Public License
 # along with Paramiko; if not, write to the Free Software Foundation, Inc.,
-# 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA.
+# 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301 USA.
 
 """
 SSH Agent interface
@@ -29,13 +29,12 @@ import time
 import tempfile
 import stat
 from select import select
-from paramiko.common import asbytes, io_sleep
-from paramiko.py3compat import byte_chr
+from paramiko.common import io_sleep, byte_chr
 
 from paramiko.ssh_exception import SSHException, AuthenticationException
 from paramiko.message import Message
 from paramiko.pkey import PKey
-from paramiko.util import retry_on_signal
+from paramiko.util import asbytes
 
 cSSH2_AGENTC_REQUEST_IDENTITIES = byte_chr(11)
 SSH2_AGENT_IDENTITIES_ANSWER = 12
@@ -55,7 +54,7 @@ ALGORITHM_FLAG_MAP = {
 }
 
 
-class AgentSSH(object):
+class AgentSSH:
     def __init__(self):
         self._conn = None
         self._keys = ()
@@ -65,6 +64,9 @@ class AgentSSH(object):
         Return the list of keys available through the SSH agent, if any.  If
         no SSH agent was running (or it couldn't be contacted), an empty list
         will be returned.
+
+        This method performs no IO, just returns the list of keys retrieved
+        when the connection was made.
 
         :return:
             a tuple of `.AgentKey` objects representing keys available on the
@@ -205,7 +207,35 @@ class AgentRemoteProxy(AgentProxyThread):
         return self.__chan, None
 
 
-class AgentClientProxy(object):
+def get_agent_connection():
+    """
+    Returns some SSH agent object, or None if none were found/supported.
+
+    .. versionadded:: 2.10
+    """
+    if ("SSH_AUTH_SOCK" in os.environ) and (sys.platform != "win32"):
+        conn = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            conn.connect(os.environ["SSH_AUTH_SOCK"])
+            return conn
+        except:
+            # probably a dangling env var: the ssh agent is gone
+            return
+    elif sys.platform == "win32":
+        from . import win_pageant, win_openssh
+
+        conn = None
+        if win_pageant.can_talk_to_agent():
+            conn = win_pageant.PageantConnection()
+        elif win_openssh.can_talk_to_agent():
+            conn = win_openssh.OpenSSHAgentConnection()
+        return conn
+    else:
+        # no agent support
+        return
+
+
+class AgentClientProxy:
     """
     Class proxying request as a client:
 
@@ -231,24 +261,8 @@ class AgentClientProxy(object):
         """
         Method automatically called by ``AgentProxyThread.run``.
         """
-        if ("SSH_AUTH_SOCK" in os.environ) and (sys.platform != "win32"):
-            conn = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-            try:
-                retry_on_signal(
-                    lambda: conn.connect(os.environ["SSH_AUTH_SOCK"])
-                )
-            except:
-                # probably a dangling env var: the ssh agent is gone
-                return
-        elif sys.platform == "win32":
-            import paramiko.win_pageant as win_pageant
-
-            if win_pageant.can_talk_to_agent():
-                conn = win_pageant.PageantConnection()
-            else:
-                return
-        else:
-            # no agent support
+        conn = get_agent_connection()
+        if not conn:
             return
         self._conn = conn
 
@@ -266,6 +280,17 @@ class AgentClientProxy(object):
 
 class AgentServerProxy(AgentSSH):
     """
+    Allows an SSH server to access a forwarded agent.
+
+    This also creates a unix domain socket on the system to allow external
+    programs to also access the agent. For this reason, you probably only want
+    to create one of these.
+
+    :meth:`connect` must be called before it is usable. This will also load the
+    list of keys the agent contains. You must also call :meth:`close` in
+    order to clean up the unix socket and the thread that maintains it.
+    (:class:`contextlib.closing` might be helpful to you.)
+
     :param .Transport t: Transport used for SSH Agent communication forwarding
 
     :raises: `.SSHException` -- mostly if we lost the agent
@@ -303,10 +328,10 @@ class AgentServerProxy(AgentSSH):
 
     def get_env(self):
         """
-        Helper for the environnement under unix
+        Helper for the environment under unix
 
         :return:
-            a dict containing the ``SSH_AUTH_SOCK`` environnement variables
+            a dict containing the ``SSH_AUTH_SOCK`` environment variables
         """
         return {"SSH_AUTH_SOCK": self._get_filename()}
 
@@ -314,7 +339,7 @@ class AgentServerProxy(AgentSSH):
         return self._file
 
 
-class AgentRequestHandler(object):
+class AgentRequestHandler:
     """
     Primary/default implementation of SSH agent forwarding functionality.
 
@@ -366,27 +391,17 @@ class Agent(AgentSSH):
 
     :raises: `.SSHException` --
         if an SSH agent is found, but speaks an incompatible protocol
+
+    .. versionchanged:: 2.10
+        Added support for native openssh agent on windows (extending previous
+        putty pageant support)
     """
 
     def __init__(self):
         AgentSSH.__init__(self)
 
-        if ("SSH_AUTH_SOCK" in os.environ) and (sys.platform != "win32"):
-            conn = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-            try:
-                conn.connect(os.environ["SSH_AUTH_SOCK"])
-            except:
-                # probably a dangling env var: the ssh agent is gone
-                return
-        elif sys.platform == "win32":
-            from . import win_pageant
-
-            if win_pageant.can_talk_to_agent():
-                conn = win_pageant.PageantConnection()
-            else:
-                return
-        else:
-            # no agent support
+        conn = get_agent_connection()
+        if not conn:
             return
         self._connect(conn)
 

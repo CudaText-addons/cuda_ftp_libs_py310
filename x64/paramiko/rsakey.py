@@ -14,7 +14,7 @@
 #
 # You should have received a copy of the GNU Lesser General Public License
 # along with Paramiko; if not, write to the Free Software Foundation, Inc.,
-# 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA.
+# 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301 USA.
 
 """
 RSA keys.
@@ -27,7 +27,6 @@ from cryptography.hazmat.primitives.asymmetric import rsa, padding
 
 from paramiko.message import Message
 from paramiko.pkey import PKey
-from paramiko.py3compat import PY2
 from paramiko.ssh_exception import SSHException
 
 
@@ -98,16 +97,9 @@ class RSAKey(PKey):
         return m.asbytes()
 
     def __str__(self):
-        # NOTE: as per inane commentary in #853, this appears to be the least
-        # crummy way to get a representation that prints identical to Python
-        # 2's previous behavior, on both interpreters.
-        # TODO: replace with a nice clean fingerprint display or something
-        if PY2:
-            # Can't just return the .decode below for Py2 because stuff still
-            # tries stuffing it into ASCII for whatever godforsaken reason
-            return self.asbytes()
-        else:
-            return self.asbytes().decode("utf8", errors="ignore")
+        # NOTE: see #853 to explain some legacy behavior.
+        # TODO 4.0: replace with a nice clean fingerprint display or something
+        return self.asbytes().decode("utf8", errors="ignore")
 
     @property
     def _fields(self):
@@ -129,7 +121,7 @@ class RSAKey(PKey):
             algorithm=self.HASHES[algorithm](),
         )
         m = Message()
-        m.add_string(algorithm)
+        m.add_string(algorithm.replace("-cert-v01@openssh.com", ""))
         m.add_string(sig)
         return m
 
@@ -141,12 +133,16 @@ class RSAKey(PKey):
         if isinstance(key, rsa.RSAPrivateKey):
             key = key.public_key()
 
+        # NOTE: pad received signature with leading zeros, key.verify()
+        # expects a signature of key size (e.g. PuTTY doesn't pad)
+        sign = msg.get_binary()
+        diff = key.key_size - len(sign) * 8
+        if diff > 0:
+            sign = b"\x00" * ((diff + 7) // 8) + sign
+
         try:
             key.verify(
-                msg.get_binary(),
-                data,
-                padding.PKCS1v15(),
-                self.HASHES[sig_algorithm](),
+                sign, data, padding.PKCS1v15(), self.HASHES[sig_algorithm]()
             )
         except InvalidSignature:
             return False
